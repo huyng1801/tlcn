@@ -10,7 +10,11 @@ import {
   sendSupportMessage,
   // tour group
   getTourGroupMessages,
-  sendTourGroupMessage
+  sendTourGroupMessage,
+  // admin
+  getAllSupportChats,
+  getAllBookingChats,
+  getAllTourChats
 } from "../controllers/chat.controller.js";
 
 const router = Router();
@@ -99,5 +103,40 @@ router.post("/support/:supportId", sendSupportMessage);
  */
 router.get("/tour/:tourId", auth, getTourGroupMessages);
 router.post("/tour/:tourId", auth, sendTourGroupMessage);
+
+
+/* ========== ADMIN APIs ========== */
+/**
+ * @openapi
+ * /api/chat/admin/support:
+ *   get:
+ *     tags: [Chat - Admin]
+ *     summary: Lấy tất cả support chat threads (admin)
+ *     security:
+ *       - bearerAuth: []
+ */
+router.get("/admin/support", auth, getAllSupportChats);
+
+/**
+ * @openapi
+ * /api/chat/admin/bookings:
+ *   get:
+ *     tags: [Chat - Admin]
+ *     summary: Lấy tất cả booking chat threads (admin)
+ *     security:
+ *       - bearerAuth: []
+ */
+router.get("/admin/bookings", auth, getAllBookingChats);
+
+/**
+ * @openapi
+ * /api/chat/admin/tours:
+ *   get:
+ *     tags: [Chat - Admin]
+ *     summary: Lấy tất cả tour group chat threads (admin)
+ *     security:
+ *       - bearerAuth: []
+ */
+router.get("/admin/tours", auth, getAllTourChats);
 
 export default router;

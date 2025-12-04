@@ -274,3 +274,120 @@ export const sendTourGroupMessage = async (req, res) => {
     res.status(500).json({ message: err.message });
   }
 };
+
+
+/* =========================================
+ *  4) ADMIN APIs - Quản lý tất cả chat
+ * ========================================= */
+
+// GET /api/chat/admin/support - Lấy tất cả support chats
+export const getAllSupportChats = async (req, res) => {
+  try {
+    // Lấy tất cả support chat threads (group by supportId)
+    const threads = await Chat.aggregate([
+      { $match: { roomType: "support" } },
+      { $sort: { createdAt: -1 } },
+      {
+        $group: {
+          _id: "$supportId",
+          supportId: { $first: "$supportId" },
+          name: { $first: "$name" },
+          email: { $first: "$email" },
+          lastMessage: { $first: "$content" },
+          lastTime: { $first: "$createdAt" },
+          messageCount: { $sum: 1 }
+        }
+      },
+      { $sort: { lastTime: -1 } }
+    ]);
+
+    res.json({ total: threads.length, data: threads });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// GET /api/chat/admin/bookings - Lấy tất cả booking chats
+export const getAllBookingChats = async (req, res) => {
+  try {
+    const threads = await Chat.aggregate([
+      { $match: { roomType: "booking" } },
+      { $sort: { createdAt: -1 } },
+      {
+        $group: {
+          _id: "$bookingCode",
+          bookingCode: { $first: "$bookingCode" },
+          tourId: { $first: "$tourId" },
+          lastMessage: { $first: "$content" },
+          lastTime: { $first: "$createdAt" },
+          messageCount: { $sum: 1 }
+        }
+      },
+      { $sort: { lastTime: -1 } },
+      {
+        $lookup: {
+          from: "tbl_tour",
+          localField: "tourId",
+          foreignField: "_id",
+          as: "tour"
+        }
+      },
+      {
+        $addFields: {
+          tourTitle: { $arrayElemAt: ["$tour.title", 0] }
+        }
+      },
+      {
+        $project: {
+          tour: 0
+        }
+      }
+    ]);
+
+    res.json({ total: threads.length, data: threads });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// GET /api/chat/admin/tours - Lấy tất cả tour group chats
+export const getAllTourChats = async (req, res) => {
+  try {
+    const threads = await Chat.aggregate([
+      { $match: { roomType: "tour" } },
+      { $sort: { createdAt: -1 } },
+      {
+        $group: {
+          _id: "$tourId",
+          tourId: { $first: "$tourId" },
+          lastMessage: { $first: "$content" },
+          lastTime: { $first: "$createdAt" },
+          messageCount: { $sum: 1 }
+        }
+      },
+      { $sort: { lastTime: -1 } },
+      {
+        $lookup: {
+          from: "tbl_tour",
+          localField: "tourId",
+          foreignField: "_id",
+          as: "tour"
+        }
+      },
+      {
+        $addFields: {
+          tourTitle: { $arrayElemAt: ["$tour.title", 0] }
+        }
+      },
+      {
+        $project: {
+          tour: 0
+        }
+      }
+    ]);
+
+    res.json({ total: threads.length, data: threads });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
