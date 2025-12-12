@@ -224,5 +224,27 @@ router.get("/:code", auth, getMyBookingDetail);
  */
 router.put("/:code/cancel", auth, cancelBookingByUser);
 
+// Debug endpoint - check tour prices
+router.get("/debug/tour-price/:tourId", async (req, res) => {
+  try {
+    const { Tour } = await import("../models/Tour.js");
+    const tour = await Tour.findById(req.params.tourId).lean();
+    if (!tour) return res.status(404).json({ message: "Tour not found" });
+    
+    res.json({
+      _id: tour._id,
+      title: tour.title,
+      priceAdult: tour.priceAdult,
+      priceChild: tour.priceChild,
+      status: tour.status,
+      current_guests: tour.current_guests,
+      min_guests: tour.min_guests,
+      quantity: tour.quantity
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 export default router;
 

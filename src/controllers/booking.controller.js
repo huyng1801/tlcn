@@ -2,18 +2,29 @@ import mongoose from "mongoose";
 import { Tour } from "../models/Tour.js";
 import { Booking } from "../models/Booking.js";
 import { sendMail } from "../services/mailer.js";
-import { buildVNPayPayUrl } from "../utils/vnpay.js";
+import paymentService from "../services/paymentService.js";
 import { createMoMoPayment } from "../utils/momo.js";
 import { notifyTourConfirmed } from "../services/notify.js";
 import axios from "axios";
 import crypto from "crypto";
 
 const genCode = () => "BKG" + Math.random().toString(36).slice(2, 8).toUpperCase();
-const clientIP = (req) =>
-  req.headers["x-forwarded-for"]?.split(",")[0] ||
-  req.connection?.remoteAddress ||
-  req.socket?.remoteAddress ||
-  "127.0.0.1";
+const clientIP = (req) => {
+  let ip = req.headers["x-forwarded-for"]?.split(",")[0] ||
+           req.connection?.remoteAddress ||
+           req.socket?.remoteAddress ||
+           "127.0.0.1";
+  
+  // Remove IPv6 prefix if present
+  ip = ip.replace(/^::ffff:/, '');
+  
+  // Validate IP format
+  if (!/^(\d{1,3}\.){3}\d{1,3}$/.test(ip)) {
+    ip = "127.0.0.1";
+  }
+  
+  return ip;
+};
 
 export const createBooking = async (req, res) => {
   const session = await mongoose.startSession();
@@ -23,7 +34,7 @@ export const createBooking = async (req, res) => {
     console.log("📝 Received booking request:", JSON.stringify(req.body, null, 2));
 
     // Handle both old flat format and new nested format
-    let tourId, numAdults, numChildren, fullName, email, phoneNumber, address, note;
+    let tourId, numAdults, numChildren, fullName, email, phoneNumber, address, note, paymentMethod;
     
     if (req.body.contact) {
       // New format from frontend
@@ -36,6 +47,7 @@ export const createBooking = async (req, res) => {
       phoneNumber = contact?.phone;
       address = contact?.address;
       note = req.body.note;
+      paymentMethod = req.body.paymentMethod || "vnpay";
     } else {
       // Old flat format
       const data = req.body;
@@ -47,10 +59,22 @@ export const createBooking = async (req, res) => {
       phoneNumber = data.phoneNumber;
       address = data.address;
       note = data.note;
+      paymentMethod = data.paymentMethod || "vnpay";
     }
 
+    // Normalize payment method - map frontend values to backend values
+    const paymentMethodMap = {
+      "vnpay-payment": "vnpay",
+      "momo-payment": "momo",
+      "office-payment": "office",
+      "office": "office",
+      "vnpay": "vnpay",
+      "momo": "momo"
+    };
+    paymentMethod = paymentMethodMap[paymentMethod] || paymentMethod;
+
     console.log("🎯 Parsed booking data:", {
-      tourId, numAdults, numChildren, fullName, email, phoneNumber, address
+      tourId, numAdults, numChildren, fullName, email, phoneNumber, address, paymentMethod
     });
 
     if (!mongoose.isValidObjectId(tourId)) {
@@ -84,9 +108,28 @@ export const createBooking = async (req, res) => {
     const priceChild = tour.priceChild ?? Math.round(priceAdult * 0.6);
     const totalPrice = (Number(numAdults) * priceAdult) + (Number(numChildren) * priceChild);
     
+    console.log("💰 Price Calculation:");
+    console.log("   priceAdult:", priceAdult);
+    console.log("   priceChild:", priceChild);
+    console.log("   numAdults:", numAdults);
+    console.log("   numChildren:", numChildren);
+    console.log("   totalPrice:", totalPrice);
+    
+    // Note: For production, enforce minimum 10,000 VND for VNPay
+    // For testing with low prices, we'll allow but warn
+    if (paymentMethod === "vnpay" && totalPrice < 10000) {
+      console.warn("⚠️  WARNING: Total price", totalPrice, "is below VNPay minimum 10,000 VND");
+      console.warn("   VNPay may reject this payment. For testing, update tour prices.");
+    }
+    
     const alreadyConfirmed = tour.status === "confirmed" || (tour.current_guests >= (tour.min_guests || 0));
     const depositRate   = alreadyConfirmed ? 1 : Number(process.env.BOOKING_DEPOSIT_RATE ?? 0.2);
     const depositAmount = Math.round(totalPrice * depositRate);
+    
+    console.log("💰 Deposit Calculation:");
+    console.log("   depositRate:", depositRate);
+    console.log("   depositAmount:", depositAmount);
+    console.log("   alreadyConfirmed:", alreadyConfirmed);
 
     const code = "BK" + Math.random().toString(36).slice(2, 8).toUpperCase();
     const [booking] = await Booking.create([{
@@ -98,7 +141,7 @@ export const createBooking = async (req, res) => {
       totalPrice,
       bookingStatus: "p",
       depositRate, depositAmount,
-      paymentMethod: "momo",
+      paymentMethod: paymentMethod,
       paidAmount: 0,
       depositPaid: false,
       paymentRefs: [],
@@ -108,12 +151,62 @@ export const createBooking = async (req, res) => {
     await session.commitTransaction();
     session.endSession();
 
-    // Tạm thời skip MoMo integration để test booking creation
+    // Generate payment URL based on payment method
+    let paymentUrl = null;
+    
+    if (paymentMethod === "vnpay") {
+      try {
+        console.log("🎯 VNPay Payment Details:");
+        console.log("   Booking Code:", booking.code);
+        console.log("   Total Price:", booking.totalPrice);
+        console.log("   Deposit Rate:", depositRate);
+        console.log("   Deposit Amount:", depositAmount);
+        console.log("   Amount * 100:", depositAmount * 100);
+        console.log("   IP Address:", clientIP(req));
+        
+        paymentUrl = paymentService.createVNPayUrl({
+          id: booking._id,
+          code: booking.code,
+          totalPrice: depositAmount,
+          tourId: booking.tourId,
+          ipAddr: clientIP(req),
+          returnUrl: `${process.env.BASE_URL || "http://localhost:5000"}/api/payment/vnpay/return`
+        });
+        console.log("✅ VNPay URL generated successfully");
+      } catch (e) {
+        console.error("❌ VNPay URL generation error:", e.message);
+        console.error("Stack:", e.stack);
+      }
+    } else if (paymentMethod === "momo") {
+      try {
+        const momoResult = await createMoMoPayment({
+          partnerCode: process.env.MOMO_PARTNER_CODE,
+          accessKey: process.env.MOMO_ACCESS_KEY,
+          secretKey: process.env.MOMO_SECRET_KEY,
+          momoApi: process.env.MOMO_API,
+          redirectUrl: process.env.MOMO_REDIRECT_URL,
+          ipnUrl: process.env.MOMO_IPN_URL,
+          amountVND: String(depositAmount),
+          orderId: booking.code,
+          requestId: booking.code,
+          orderInfo: `Thanh toan tour ${tour.title || tourId}`,
+          requestType: "captureWallet",
+          extraData: ""
+        });
+        paymentUrl = momoResult.payUrl || null;
+        console.log("💳 MoMo URL generated:", paymentUrl);
+      } catch (e) {
+        console.error("MoMo URL generation error:", e);
+      }
+    }
+
     console.log("🛒 Booking created successfully:", {
       bookingId: booking._id,
       code: booking.code,
       totalPrice: booking.totalPrice,
-      depositAmount: booking.depositAmount
+      depositAmount: booking.depositAmount,
+      paymentMethod: booking.paymentMethod,
+      paymentUrl
     });
 
     return res.status(201).json({
@@ -123,8 +216,9 @@ export const createBooking = async (req, res) => {
       code: booking.code,
       status: booking.bookingStatus,
       payment: {
-        redirectUrl: null  // Will be null for now, can add MoMo URL later
+        redirectUrl: paymentUrl
       },
+      payUrl: paymentUrl,  // Also send as payUrl for compatibility
       total: booking.totalPrice,
       // Additional info for debugging
       booking: {
@@ -140,6 +234,7 @@ export const createBooking = async (req, res) => {
         totalPrice: booking.totalPrice,
         depositAmount: booking.depositAmount,
         bookingStatus: booking.bookingStatus,
+        paymentMethod: booking.paymentMethod,
         createdAt: booking.createdAt
       }
     });

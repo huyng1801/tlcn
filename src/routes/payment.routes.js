@@ -3,6 +3,10 @@ import { verifyMoMoIPN } from "../utils/momo.js";
 import { onPaymentReceived } from "../controllers/booking.controller.js";
 import { auth } from "../middleware/auth.js";
 import { vnpReturn, vnpIpn } from "../controllers/payment.controller.js";
+import { buildVNPayPayUrl } from "../utils/vnpay.js";
+import { Booking } from "../models/Booking.js";
+import { Tour } from "../models/Tour.js";
+import { createMoMoPayment } from "../utils/momo.js";
 const router = Router();
 
 /**
@@ -105,6 +109,75 @@ router.post("/momo/create-remaining", auth, async (req, res) => {
       return res.status(502).json({ message: "MoMo create payment failed", error, raw });
     }
     res.json({ payUrl, remain });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+/**
+ * Tạo payUrl VNPay để thanh toán phần còn lại hoặc cọc của booking
+ * body: { code: "BKABC123", type: "deposit" | "remaining" }
+ * yêu cầu user phải là chủ booking
+ */
+router.post("/vnpay/create-payment", auth, async (req, res) => {
+  try {
+    const { code, type = "remaining" } = req.body;
+    if (!code) return res.status(400).json({ message: "code is required" });
+
+    const booking = await Booking.findOne({ code });
+    if (!booking) return res.status(404).json({ message: "Booking not found" });
+
+    // chỉ cho chủ booking gọi
+    if (String(booking.userId) !== String(req.user.id)) {
+      return res.status(403).json({ message: "Forbidden" });
+    }
+
+    let amount;
+    let orderInfo;
+    let txnRef;
+
+    if (type === "deposit" && !booking.depositPaid) {
+      // Thanh toán cọc
+      amount = booking.depositAmount || 0;
+      orderInfo = `Dat coc ${booking.code}`.replace(/[^a-zA-Z0-9\s]/g, '');
+      txnRef = booking.code;
+    } else if (type === "remaining") {
+      // Thanh toán phần còn lại
+      const remain = Math.max(0, (booking.totalPrice || 0) - (booking.paidAmount || 0));
+      if (remain <= 0) {
+        return res.status(400).json({ message: "No remaining amount" });
+      }
+      amount = remain;
+      orderInfo = `Dat tour ${booking.code}`.replace(/[^a-zA-Z0-9\s]/g, '');
+      txnRef = `${booking.code}-remain-${Date.now()}`;
+    } else {
+      return res.status(400).json({ message: "Invalid payment type or deposit already paid" });
+    }
+
+    // Get clean IP address
+    const clientIP = req.headers["x-forwarded-for"]?.split(",")[0] || req.connection?.remoteAddress || "127.0.0.1";
+    const cleanIP = clientIP.replace(/^::ffff:/, ''); // Remove IPv6 prefix if present
+
+    console.log("Creating VNPay payment with params:", {
+      amount,
+      orderInfo,
+      txnRef,
+      clientIP: cleanIP
+    });
+
+    const payUrl = buildVNPayPayUrl({
+      vnpUrl: process.env.VNP_URL,
+      tmnCode: process.env.VNP_TMN_CODE,
+      hashSecret: process.env.VNP_HASH_SECRET,
+      amountVND: amount,
+      orderInfo,
+      txnRef,
+      ipAddr: cleanIP,
+      returnUrl: process.env.VNP_RETURN_URL,
+      locale: "vn"
+    });
+
+    res.json({ payUrl, amount, type });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
